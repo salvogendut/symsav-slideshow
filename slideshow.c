@@ -307,10 +307,26 @@ static unsigned short get_delay_ticks(unsigned char idx) {
 }
 
 // --------------------------------------------------------------------------
-// Scan the configured directory for *.SGX files and populate filenames[].
+// Returns 1 if name ends with .SGX or .sgx (case-insensitive last 4 chars).
+// --------------------------------------------------------------------------
+static unsigned char is_sgx(char *name) {
+    unsigned char n = (unsigned char)strlen(name);
+    char c1, c2, c3;
+    if (n < 4) return 0;
+    if (name[n - 4] != '.') return 0;
+    c1 = name[n - 3]; if (c1 >= 'a') c1 -= 32;
+    c2 = name[n - 2]; if (c2 >= 'a') c2 -= 32;
+    c3 = name[n - 1]; if (c3 >= 'a') c3 -= 32;
+    return (c1 == 'S' && c2 == 'G' && c3 == 'X') ? 1 : 0;
+}
+
+// --------------------------------------------------------------------------
+// Scan the configured directory for SGX files and populate filenames[].
+// The path is passed without a wildcard — Dir_Read does not support wildcards;
+// we filter by .SGX extension here.
 // --------------------------------------------------------------------------
 static unsigned char scan_dir(void) {
-    char searchpath[64];
+    char searchpath[60];
     int n, i;
     unsigned char plen;
     DirEntry *entry;
@@ -321,23 +337,23 @@ static unsigned char scan_dir(void) {
     plen = (unsigned char)strlen(searchpath);
     while (plen > 0 && searchpath[plen - 1] == ' ') searchpath[--plen] = 0;
     if (plen > 0 && searchpath[plen - 1] != '\\' && searchpath[plen - 1] != '/') {
-        if (plen < 62) {
+        if (plen < 58) {
             searchpath[plen]     = '\\';
             searchpath[plen + 1] = 0;
             plen++;
         }
     }
-    if (plen < 58) strcat(searchpath, "*.SGX");
 
+    // Pass directory path only — no wildcard; kernel does not support them.
     n = Dir_Read(searchpath,
-                 ATTRIB_ARCHIVE,
+                 ATTRIB_DIR,
                  (void *)dirbuf, (unsigned short)sizeof(dirbuf), 0);
     if (n <= 0) { file_count = 0; return 0; }
 
     file_count = 0;
     entry = (DirEntry *)dirbuf;
     for (i = 0; i < n && file_count < MAX_FILES; i++) {
-        if (!(entry->attrib & ATTRIB_DIR) && strlen(entry->name) >= 4) {
+        if (!(entry->attrib & ATTRIB_DIR) && is_sgx(entry->name)) {
             strncpy(filenames[file_count], entry->name, 13);
             filenames[file_count][13] = 0;
             file_count++;
