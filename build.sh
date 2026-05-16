@@ -3,7 +3,7 @@
 
 SCC="${SCC:-../scc/bin/cc}"
 
-"$SCC" slideshow.c \
+"$SCC" slideshow.c slideshow_msx.s \
     -N "Slideshow" \
     -o slideshow.sav \
     -h 512
