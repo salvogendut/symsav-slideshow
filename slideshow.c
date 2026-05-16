@@ -37,10 +37,18 @@ extern void vdp_write(unsigned int vram_addr, char *src, unsigned short len);
 // Data-segment buffers
 // --------------------------------------------------------------------------
 
-// One SGX chunk buffer.
-// CPC: max 160x200 = 8000 bytes.
-// MSX: used as a single-row scratch (256 bytes) for row-by-row blitting.
-_data unsigned char imgbuf[8192];
+// Row scratch buffer — used for one row at a time (max 256 bytes for MSX,
+// 40 bytes for CPC).  CPC chunks are blitted row-by-row so no full-chunk
+// buffer is needed.
+_data unsigned char imgbuf[256];
+
+// Write-through shadow of CPC VRAM char rows 12-24 (pixel rows 96-199).
+// Scan-plane-major layout matching mountain.c:
+//   lbuf[scan * 1040 + (crow-12) * 80 + x_byte]
+// where scan = y&7 (0-7), crow = y>>3 (12-24).
+// Size: 8 * 13 * 80 = 8320 bytes.
+// Also used as the source for vram_clear (filled with 0xF0).
+_data unsigned char lbuf[8320];
 
 // Directory listing buffer
 _data char dirbuf[1024];
@@ -140,8 +148,11 @@ static void desktop_cont(void) {
 }
 
 // --------------------------------------------------------------------------
-// Clear the screen to black.
-// CPC: Bank_Copy 0xF0 across all 8 VRAM interleave planes (uses imgbuf[0..1999]).
+// Clear the screen to black and reset the CPC lower-half shadow to black.
+// CPC: fill lbuf with 0xF0 (ink 1 = black in SymbOS default palette), then
+//      Bank_Copy each scan plane.  lbuf[0..1999] is used as the source since
+//      it is already filled with 0xF0; the remainder of lbuf is also reset so
+//      that any rows not covered by the next image restore to black.
 // MSX: vdp_fill with COLOR_BLACK nibble pairs (0x11) across all 54272 bytes.
 // --------------------------------------------------------------------------
 static void vram_clear(void) {
@@ -151,36 +162,59 @@ static void vram_clear(void) {
         vdp_fill(0u, 0x11u, 54272u);
         return;
     }
-    for (i = 0; i < 2000u; i++) imgbuf[i] = 0xF0u;
+    for (i = 0; i < 8320u; i++) lbuf[i] = 0xF0u;
     for (k = 0; k < 8; k++) {
         Bank_Copy(0,
             (char *)(0xC000u + (unsigned short)k * 0x0800u),
-            _symbank, (char *)imgbuf, 2000u);
+            _symbank, (char *)lbuf, 2000u);
     }
 }
 
 // --------------------------------------------------------------------------
-// Blit one decoded SGX simple chunk (4-colour) into CPC Mode-1 VRAM.
+// Blit one row from imgbuf into CPC Mode-1 VRAM and update the lower-half
+// shadow buffer (lbuf) so that vram_restore_lower can recover char rows 12-24
+// after each Idle() call corrupts them.
 //
-// VRAM address = 0xC000 + (y/8)*80 + (y%8)*0x800 + x_off_bytes
-// x_off_bytes: byte offset within a VRAM row (0 = left half, 40 = right half)
+// imgbuf[0..row_bytes-1] must contain the row data before calling.
+// x_off_bytes: byte offset within a VRAM row (0 = left strip, 40 = right strip)
+// y:           pixel row index (0-199)
 // --------------------------------------------------------------------------
-static void blit_chunk_cpc(unsigned char x_off_bytes,
-                            unsigned char row_bytes,
-                            unsigned char height) {
-    unsigned char y, scan, crow;
-    unsigned short addr;
-    for (y = 0; y < height; y++) {
-        scan = y & 7;
-        crow = y >> 3;
-        addr = 0xC000u
-             + (unsigned short)crow * 80u
-             + (unsigned short)scan * 0x0800u
-             + (unsigned short)x_off_bytes;
-        Bank_Copy(0, (char *)addr,
-                  _symbank,
-                  (char *)imgbuf + (unsigned short)y * (unsigned short)row_bytes,
-                  (unsigned short)row_bytes);
+static void blit_row_cpc(unsigned char x_off_bytes,
+                          unsigned char y,
+                          unsigned char row_bytes) {
+    unsigned char scan, crow;
+    unsigned short addr, lbuf_off;
+    scan = y & 7;
+    crow = y >> 3;
+    addr = 0xC000u
+         + (unsigned short)crow  * 80u
+         + (unsigned short)scan  * 0x0800u
+         + (unsigned short)x_off_bytes;
+    Bank_Copy(0, (char *)addr, _symbank, (char *)imgbuf, (unsigned short)row_bytes);
+    if (crow >= 12) {
+        lbuf_off = (unsigned short)scan * 1040u
+                 + (unsigned short)(crow - 12u) * 80u
+                 + (unsigned short)x_off_bytes;
+        memcpy((char *)lbuf + lbuf_off, (char *)imgbuf, (unsigned short)row_bytes);
+    }
+}
+
+// --------------------------------------------------------------------------
+// Restore CPC VRAM char rows 12-24 from lbuf.
+// Called after every Idle() in wait_delay to overwrite corruption written by
+// the kernel/interrupt during the yield.
+// Uses 8 Bank_Copy calls (one per scan plane) of 1040 bytes each —
+// the same approach as mountain.c.
+// --------------------------------------------------------------------------
+static void vram_restore_lower(void) {
+    unsigned char k;
+    if (is_msx) return;
+    for (k = 0; k < 8; k++) {
+        Bank_Copy(0,
+            (char *)(0xC000u + (unsigned short)k * 0x0800u + 960u),
+            _symbank,
+            (char *)lbuf + (unsigned short)k * 1040u,
+            1040u);
     }
 }
 
@@ -200,7 +234,7 @@ static void blit_chunk_cpc(unsigned char x_off_bytes,
 // --------------------------------------------------------------------------
 static unsigned char load_image(char *path) {
     unsigned char fd, compressed;
-    unsigned short bytes_read, data_size;
+    unsigned short bytes_read;
     unsigned short row_bytes, height, x_off, r;
 
     fd = File_Open(_symbank, path);
@@ -230,11 +264,13 @@ static unsigned char load_image(char *path) {
         } else {
             // Simple chunk (4-colour)
             if (is_msx) break;
+            if (compressed) break;  // compressed CPC SGX not supported
             row_bytes = (unsigned short)(chunk_hdr[0] & 0x3F);
             height    = (unsigned short)chunk_hdr[2];
         }
 
         if (row_bytes == 0 || height == 0) break;
+        if (row_bytes > sizeof(imgbuf)) break;
 
         if (is_msx) {
             // Uncompressed: read one row at a time, write to VDP immediately.
@@ -244,16 +280,14 @@ static unsigned char load_image(char *path) {
                 vdp_write(r * 256u + x_off, (char *)imgbuf, row_bytes);
             }
         } else {
-            data_size = row_bytes * height;
-            if (data_size > 8190u) break;
-            if (compressed) {
-                File_ReadComp(fd, _symbank, (char *)imgbuf, data_size);
-            } else {
-                File_Read(fd, _symbank, (char *)imgbuf, data_size);
+            // CPC: read and blit one row at a time, updating lbuf for rows >= 96.
+            for (r = 0; r < height; r++) {
+                bytes_read = File_Read(fd, _symbank, (char *)imgbuf, row_bytes);
+                if (bytes_read < row_bytes) break;
+                blit_row_cpc((unsigned char)x_off,
+                             (unsigned char)r,
+                             (unsigned char)row_bytes);
             }
-            blit_chunk_cpc((unsigned char)x_off,
-                           (unsigned char)row_bytes,
-                           (unsigned char)height);
         }
         x_off += row_bytes;
     }
@@ -296,7 +330,7 @@ static unsigned char scan_dir(void) {
     if (plen < 58) strcat(searchpath, "*.SGX");
 
     n = Dir_Read(searchpath,
-                 ATTRIB_HIDDEN | ATTRIB_SYSTEM | ATTRIB_VOLUME | ATTRIB_DIR,
+                 ATTRIB_ARCHIVE,
                  (void *)dirbuf, (unsigned short)sizeof(dirbuf), 0);
     if (n <= 0) { file_count = 0; return 0; }
 
@@ -331,6 +365,7 @@ static unsigned char wait_delay(unsigned short ticks) {
         if (Mouse_X() != mx0 || Mouse_Y() != my0 || Mouse_Buttons()) return 1;
         if (any_key_down()) return 1;
         Idle();
+        vram_restore_lower();
     }
     return 0;
 }
