@@ -531,9 +531,6 @@ void start_animation(void) {
         }
     }
 
-    vram_clear();
-    Idle();
-
     cur_file = 0;
     fc       = file_count;
     result   = 0;
@@ -551,6 +548,20 @@ void start_animation(void) {
             if (result == 0)
                 cur_file = (unsigned char)((cur_file + 1) % fc);
         } else {
+            // No SGX files found — fill with ink 2 (0x0F = dim grey in Mode 1)
+            // so the user can distinguish "running but no files" from a crash.
+            if (!is_msx) {
+                unsigned char k2;
+                unsigned short i2;
+                for (i2 = 0; i2 < 8320u; i2++) lbuf[i2] = 0x0Fu;
+                for (k2 = 0; k2 < 8; k2++) {
+                    Bank_Copy(0,
+                        (char *)(0xC000u + (unsigned short)k2 * 0x0800u),
+                        _symbank, (char *)lbuf, 2000u);
+                }
+            } else {
+                vdp_fill(0u, 0x99u, 54272u);  // green on MSX = visible non-black
+            }
             result = wait_delay(500u);
         }
     }
