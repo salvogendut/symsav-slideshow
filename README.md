@@ -2,7 +2,7 @@
 
 A photo slideshow screensaver for [SymbOS](https://www.symbos.org/) on the Amstrad CPC and MSX.
 
-> **Alpha version — use at your own risk.** This software is in an early alpha state and may cause harm to your system. If you choose to try it, you do so entirely at your own risk.
+> **Beta version — working on CPC.** The CPC slideshow is working. MSX support is implemented but not yet tested on real hardware.
 
 > **CPC: Requires Mode 1** — on the Amstrad CPC this screensaver only works in 320×200 Mode 1 (4 colours). Running it in any other screen mode will produce incorrect output.
 
@@ -20,18 +20,18 @@ Requires the SCC compiler (set `SCC=` env var if not at `../scc/bin/cc`) and Pyt
 
 Build steps:
 
-1. SCC compiles `slideshow.c` + `slideshow_msx.s` → `slideshow.sav`
-2. `add_preview.py` generates and patches the preview thumbnail into the binary at file offset 256
+1. SCC compiles `slideshow.c` + `slideshow_msx.s` → `slides.sav`
+2. `add_preview.py` generates a preview thumbnail and patches it into the binary at offset 256
 
-Output: `slideshow.sav`
+Output: `slides.sav`
 
 ---
 
 ## Installing
 
-1. Copy `slideshow.sav` into your `C:\SYMBOS\` directory.
+1. Copy `slides.sav` into your `C:\SYMBOS\` directory.
 2. Open **Display Properties** and go to the **Screen Saver** tab.
-3. Click **Browse** and select `slideshow.sav`.
+3. Click **Browse** and select `slides.sav`.
 4. Click **Setup** to configure the effect:
    - **Delay**: 3 s / 5 s / 10 s / 30 s — time each image is shown before advancing
    - **Path**: directory containing the SGX image files (e.g. `A:\SLIDES\`)
@@ -62,7 +62,7 @@ Keep CPC and MSX image sets in separate directories, as each platform only reads
 
 ## Effect
 
-- On activation, the screensaver scans the configured directory for `*.SGX` files (up to 40).
+- On activation, the screensaver scans the configured directory for `*.SGX` files (up to 40). The directory scan uses `DIRINP` with a `*.*` wildcard — a bare `*` is rejected by SymbOS with `ERR_BADNAME`.
 - It clears the screen to black and blits each image directly into VRAM.
 - After the configured delay the screen clears briefly and the next image is loaded.
 - The rotation is sequential and wraps around to the first image after the last.
