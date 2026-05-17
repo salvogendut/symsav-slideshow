@@ -493,20 +493,6 @@ void start_animation(void) {
 
     scan_dir();
 
-    // dbg_line1 holds the searchpath (written by scan_dir).
-    sprintf(dbg_line2, "FC:%02X HL:%02X%02X B:%d S:%d D:%d",
-            (unsigned int)dbg_fc_ret,
-            (unsigned int)dbg_msg9, (unsigned int)dbg_msg8,
-            (int)_symbank, (int)file_count, dir_read_count);
-
-    dbg_ct1.text  = dbg_line1;
-    dbg_ct1.color = (COLOR_WHITE << 2) | COLOR_BLACK;
-    dbg_ct1.flags = 0;
-
-    dbg_ct2.text  = dbg_line2;
-    dbg_ct2.color = (COLOR_WHITE << 2) | COLOR_BLACK;
-    dbg_ct2.flags = 0;
-
     empty_str[0] = 0;
 
     anim_ctrl[0].value  = 0;
@@ -519,28 +505,8 @@ void start_animation(void) {
     anim_ctrl[0].h      = screen_h;
     anim_ctrl[0].unused = 0;
 
-    anim_ctrl[1].value  = 0;
-    anim_ctrl[1].type   = C_TEXT;
-    anim_ctrl[1].bank   = -1;
-    anim_ctrl[1].param  = (unsigned short)&dbg_ct1;
-    anim_ctrl[1].x      = 2;
-    anim_ctrl[1].y      = 4;
-    anim_ctrl[1].w      = screen_w - 4;
-    anim_ctrl[1].h      = 8;
-    anim_ctrl[1].unused = 0;
-
-    anim_ctrl[2].value  = 0;
-    anim_ctrl[2].type   = C_TEXT;
-    anim_ctrl[2].bank   = -1;
-    anim_ctrl[2].param  = (unsigned short)&dbg_ct2;
-    anim_ctrl[2].x      = 2;
-    anim_ctrl[2].y      = 14;
-    anim_ctrl[2].w      = screen_w - 4;
-    anim_ctrl[2].h      = 8;
-    anim_ctrl[2].unused = 0;
-
     memset(&anim_cg, 0, sizeof(anim_cg));
-    anim_cg.controls = 3;
+    anim_cg.controls = 1;
     anim_cg.pid      = _sympid;
     anim_cg.first    = &anim_ctrl[0];
 
@@ -564,9 +530,6 @@ void start_animation(void) {
     if (wid < 0) return;
 
     desktop_stop((unsigned char)wid);
-
-    wait_delay(500u); // 10-second pause so debug text can be read
-
     delay = get_delay_ticks((unsigned char)cfgdat[4]);
 
     strncpy(basepath, cfgdat + 5, 52);
