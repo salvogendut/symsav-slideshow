@@ -8,7 +8,7 @@ to suggest a photo slideshow.
 
 import struct
 
-SAV_PATH = "slideshow.sav"
+SAV_PATH = "slides.sav"
 
 INSERT_AT    = 256
 PREVIEW_W    = 64    # pixels (= 16 bytes per row in Mode-1)

@@ -5,7 +5,7 @@ SCC="${SCC:-../scc/bin/cc}"
 
 "$SCC" slideshow.c slideshow_msx.s \
     -N "Slideshow" \
-    -o slideshow.sav \
+    -o slides.sav \
     -h 512
 
 python3 add_preview.py
