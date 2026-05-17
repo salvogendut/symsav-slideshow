@@ -1,3 +1,6 @@
+![Example Image](20260517_201611.jpg)
+![Example Image](20260517_201630.jpg)
+
 # symsav-slideshow
 
 A photo slideshow screensaver for [SymbOS](https://www.symbos.org/) on the Amstrad CPC and MSX.
