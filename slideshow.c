@@ -33,6 +33,9 @@
 // VDP helpers (MSX only)
 extern void vdp_fill(unsigned int vram_addr, unsigned char fill_byte, unsigned short len);
 extern void vdp_write(unsigned int vram_addr, char *src, unsigned short len);
+extern void vdp_fill_bank(unsigned char bank, unsigned int vram_addr, unsigned char fill_byte, unsigned short len);
+extern void vdp_write_bank(unsigned char bank, unsigned int vram_addr, char *src, unsigned short len);
+extern void vdp_set_page(unsigned char page);
 
 // --------------------------------------------------------------------------
 // Data-segment buffers
@@ -69,6 +72,11 @@ _data char dbg_ename[13];
 // Scratch buffers for reading SGX chunk headers
 _data unsigned char chunk_hdr[4];
 _data unsigned char ext_hdr[6];
+
+// MSX double-buffering: R#14 bank for load_image VDP writes (0=page0, 4=page1)
+_data unsigned char msx_write_bank;
+// MSX double-buffering: which VRAM page is currently displayed (0 or 1)
+_data unsigned char msx_front_page;
 
 // --------------------------------------------------------------------------
 // Transfer segment: animation state
@@ -163,7 +171,7 @@ static void vram_clear(void) {
     unsigned char k;
     unsigned short i;
     if (is_msx) {
-        vdp_fill(0u, 0x11u, 54272u);
+        vdp_fill_bank(msx_write_bank, 0u, 0x11u, 54272u);
         return;
     }
     for (i = 0; i < 8320u; i++) lbuf[i] = 0xF0u;
@@ -240,7 +248,7 @@ static unsigned char load_image(char *path) {
             if (row_bytes > sizeof(imgbuf)) break;
             for (r = 0; r < height; r++) {
                 File_Read(fd, _symbank, (char *)imgbuf, row_bytes);
-                vdp_write(r * 256u + x_off, (char *)imgbuf, row_bytes);
+                vdp_write_bank(msx_write_bank, r * 256u + x_off, (char *)imgbuf, row_bytes);
             }
             x_off += row_bytes;
         }
@@ -588,23 +596,51 @@ void start_animation(void) {
     fc       = file_count;
     result   = 0;
 
+    // MSX: start with page 0 displayed, preload first image into page 1 (bank 4).
+    // Each iteration: preload next image into back buffer while front is shown,
+    // then flip R#2 instantly — no column artifact visible.
+    if (is_msx) {
+        msx_front_page = 0;
+        msx_write_bank = 4;    // write into page 1 (VRAM 0x10000) first
+        vdp_set_page(0);       // ensure VDP displays page 0 (black initially)
+    }
+
     while (result == 0) {
         if (fc > 0) {
             strncpy(filepath, basepath, 58);
             strncat(filepath, filenames[cur_file], 13);
 
-            vram_clear();
-            Idle();
-            load_image(filepath);
-
-            result = wait_delay(delay);
-            if (result == 0)
-                cur_file = (unsigned char)((cur_file + 1) % fc);
+            if (is_msx) {
+                unsigned char back_bank = msx_write_bank;
+                unsigned char back_page = msx_front_page ? 0 : 1;
+                // Clear and preload into hidden back buffer
+                vram_clear();
+                load_image(filepath);
+                // Wait configured delay (back buffer loads hidden behind front)
+                result = wait_delay(delay);
+                if (result == 0) {
+                    // Instant page flip — no column artifact
+                    vdp_set_page(back_page);
+                    msx_front_page = back_page;
+                    msx_write_bank = msx_front_page ? 0 : 4;
+                    cur_file = (unsigned char)((cur_file + 1) % fc);
+                }
+            } else {
+                vram_clear();
+                Idle();
+                load_image(filepath);
+                result = wait_delay(delay);
+                if (result == 0)
+                    cur_file = (unsigned char)((cur_file + 1) % fc);
+            }
         } else {
-            vram_clear();
+            if (!is_msx) vram_clear();
             result = wait_delay(500u);
         }
     }
+
+    // Restore MSX VDP to page 0 so SymbOS desktop renders correctly
+    if (is_msx && msx_front_page) vdp_set_page(0);
 
     desktop_cont();
     Idle();
