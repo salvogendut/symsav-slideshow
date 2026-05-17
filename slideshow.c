@@ -451,16 +451,17 @@ static unsigned char scan_dir(void) {
 }
 
 // --------------------------------------------------------------------------
-// Wait up to `ticks` Idle() calls, returning early on user activity.
+// Wait up to `ticks` 50 Hz ticks, returning early on user activity.
 // Returns: 0 = delay expired  1 = mouse/key  2 = quit message received
 // --------------------------------------------------------------------------
 static unsigned char wait_delay(unsigned short ticks) {
-    unsigned short t, mx0, my0, resp;
+    unsigned short start, mx0, my0, resp;
 
+    start = Sys_Counter16();
     mx0 = Mouse_X();
     my0 = Mouse_Y();
 
-    for (t = 0; t < ticks; t++) {
+    while ((unsigned short)(Sys_Counter16() - start) < ticks) {
         resp = Msg_Receive(_sympid, -1, _symmsg);
         if (resp & 1) {
             if ((unsigned char)_symmsg[0] == 0) return 2;
