@@ -2,7 +2,7 @@
 
 A photo slideshow screensaver for [SymbOS](https://www.symbos.org/) on the Amstrad CPC and MSX.
 
-> **Beta version — working on CPC.** The CPC slideshow is working. MSX support is implemented but not yet tested on real hardware.
+> **Beta version — working on CPC and MSX.** Tested on real hardware on both platforms.
 
 > **CPC: Requires Mode 1** — on the Amstrad CPC this screensaver only works in 320×200 Mode 1 (4 colours). Running it in any other screen mode will produce incorrect output.
 
