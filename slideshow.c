@@ -12,6 +12,7 @@
 #include <symbos/file.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #define MSC_SAV_INIT   1
 #define MSC_SAV_START  2
@@ -37,17 +38,10 @@ extern void vdp_write(unsigned int vram_addr, char *src, unsigned short len);
 // Data-segment buffers
 // --------------------------------------------------------------------------
 
-// Row scratch buffer — used for one row at a time (max 256 bytes for MSX,
-// 40 bytes for CPC).  CPC chunks are blitted row-by-row so no full-chunk
-// buffer is needed.
 _data unsigned char imgbuf[256];
 
 // Write-through shadow of CPC VRAM char rows 12-24 (pixel rows 96-199).
-// Scan-plane-major layout matching mountain.c:
-//   lbuf[scan * 1040 + (crow-12) * 80 + x_byte]
-// where scan = y&7 (0-7), crow = y>>3 (12-24).
 // Size: 8 * 13 * 80 = 8320 bytes.
-// Also used as the source for vram_clear (filled with 0xF0).
 _data unsigned char lbuf[8320];
 
 // Directory listing buffer
@@ -62,9 +56,19 @@ _data char filenames[MAX_FILES][14];
 _data unsigned char file_count;
 _data unsigned char cur_file;
 
+// Debug variables
+_data unsigned char dir_read_ok;
+_data int dir_read_count;
+_data unsigned char dbg_fc_ret;
+_data unsigned char dbg_msg2;
+_data unsigned char dbg_msg8;
+_data unsigned char dbg_msg9;
+_data unsigned char dbg_e_att;
+_data char dbg_ename[13];
+
 // Scratch buffers for reading SGX chunk headers
-_data unsigned char chunk_hdr[4];   // first 3 bytes of any chunk
-_data unsigned char ext_hdr[6];     // remaining 5 bytes of an extended chunk header
+_data unsigned char chunk_hdr[4];
+_data unsigned char ext_hdr[6];
 
 // --------------------------------------------------------------------------
 // Transfer segment: animation state
@@ -76,10 +80,15 @@ _transfer unsigned short screen_h;
 // --------------------------------------------------------------------------
 // Transfer segment: animation window
 // --------------------------------------------------------------------------
-_transfer Ctrl       anim_ctrl[1];
+_transfer Ctrl       anim_ctrl[3];
 _transfer Ctrl_Group anim_cg;
 _transfer Window     anim_win;
 _transfer char       empty_str[1];
+
+_transfer char       dbg_line1[64];
+_transfer char       dbg_line2[32];
+_transfer Ctrl_Text  dbg_ct1;
+_transfer Ctrl_Text  dbg_ct2;
 
 // --------------------------------------------------------------------------
 // Transfer segment: config state
@@ -149,11 +158,6 @@ static void desktop_cont(void) {
 
 // --------------------------------------------------------------------------
 // Clear the screen to black and reset the CPC lower-half shadow to black.
-// CPC: fill lbuf with 0xF0 (ink 1 = black in SymbOS default palette), then
-//      Bank_Copy each scan plane.  lbuf[0..1999] is used as the source since
-//      it is already filled with 0xF0; the remainder of lbuf is also reset so
-//      that any rows not covered by the next image restore to black.
-// MSX: vdp_fill with COLOR_BLACK nibble pairs (0x11) across all 54272 bytes.
 // --------------------------------------------------------------------------
 static void vram_clear(void) {
     unsigned char k;
@@ -171,13 +175,7 @@ static void vram_clear(void) {
 }
 
 // --------------------------------------------------------------------------
-// Blit one row from imgbuf into CPC Mode-1 VRAM and update the lower-half
-// shadow buffer (lbuf) so that vram_restore_lower can recover char rows 12-24
-// after each Idle() call corrupts them.
-//
-// imgbuf[0..row_bytes-1] must contain the row data before calling.
-// x_off_bytes: byte offset within a VRAM row (0 = left strip, 40 = right strip)
-// y:           pixel row index (0-199)
+// Blit one row from imgbuf into CPC Mode-1 VRAM and update lbuf shadow.
 // --------------------------------------------------------------------------
 static void blit_row_cpc(unsigned char x_off_bytes,
                           unsigned char y,
@@ -200,11 +198,7 @@ static void blit_row_cpc(unsigned char x_off_bytes,
 }
 
 // --------------------------------------------------------------------------
-// Restore CPC VRAM char rows 12-24 from lbuf.
-// Called after every Idle() in wait_delay to overwrite corruption written by
-// the kernel/interrupt during the yield.
-// Uses 8 Bank_Copy calls (one per scan plane) of 1040 bytes each —
-// the same approach as mountain.c.
+// Restore CPC VRAM char rows 12-24 from lbuf after each Idle().
 // --------------------------------------------------------------------------
 static void vram_restore_lower(void) {
     unsigned char k;
@@ -220,17 +214,6 @@ static void vram_restore_lower(void) {
 
 // --------------------------------------------------------------------------
 // Open and display all chunks of one SGX file.
-//
-// CPC: reads 4-colour simple chunks, buffers each into imgbuf, blits via
-//      Bank_Copy scanline by scanline. Extended chunks are skipped.
-//
-// MSX: reads uncompressed 16-colour extended chunks row by row — each row
-//      is read into imgbuf[0..row_bytes-1] and written to VDP immediately.
-//      Compressed extended chunks are not supported and stop processing.
-//
-// Both platforms split images into horizontal column strips; x_off accumulates.
-//
-// Returns 1 on success, 0 if the file could not be opened.
 // --------------------------------------------------------------------------
 static unsigned char load_image(char *path) {
     unsigned char fd, compressed;
@@ -249,22 +232,17 @@ static unsigned char load_image(char *path) {
         compressed = (chunk_hdr[0] & 0x80) ? 1 : 0;
 
         if (chunk_hdr[0] & 0x40) {
-            // Extended chunk (16-colour): 8-byte header, then data.
-            // Full header: [0x40|c, type, w_bytes_lo, w_bytes_hi,
-            //               w_px_lo, w_px_hi, h_lo, h_hi]
             if (!is_msx) break;
-            if (compressed) break;  // compressed MSX SGX not supported
+            if (compressed) break;
             bytes_read = File_Read(fd, _symbank, (char *)ext_hdr, 5u);
             if (bytes_read < 5 || chunk_hdr[1] != 0x05) break;
             row_bytes = (unsigned short)chunk_hdr[2]
                       | ((unsigned short)ext_hdr[0] << 8);
-            // ext_hdr[1..2] = width_px (unused)
             height    = (unsigned short)ext_hdr[3]
                       | ((unsigned short)ext_hdr[4] << 8);
         } else {
-            // Simple chunk (4-colour)
             if (is_msx) break;
-            if (compressed) break;  // compressed CPC SGX not supported
+            if (compressed) break;
             row_bytes = (unsigned short)(chunk_hdr[0] & 0x3F);
             height    = (unsigned short)chunk_hdr[2];
         }
@@ -273,14 +251,11 @@ static unsigned char load_image(char *path) {
         if (row_bytes > sizeof(imgbuf)) break;
 
         if (is_msx) {
-            // Uncompressed: read one row at a time, write to VDP immediately.
-            // MSX Screen 7 VRAM: row r at address r*256; x_off is byte col offset.
             for (r = 0; r < height; r++) {
                 File_Read(fd, _symbank, (char *)imgbuf, row_bytes);
                 vdp_write(r * 256u + x_off, (char *)imgbuf, row_bytes);
             }
         } else {
-            // CPC: read and blit one row at a time, updating lbuf for rows >= 96.
             for (r = 0; r < height; r++) {
                 bytes_read = File_Read(fd, _symbank, (char *)imgbuf, row_bytes);
                 if (bytes_read < row_bytes) break;
@@ -307,7 +282,7 @@ static unsigned short get_delay_ticks(unsigned char idx) {
 }
 
 // --------------------------------------------------------------------------
-// Returns 1 if name ends with .SGX or .sgx (case-insensitive last 4 chars).
+// Returns 1 if name ends with .SGX or .sgx (case-insensitive).
 // --------------------------------------------------------------------------
 static unsigned char is_sgx(char *name) {
     unsigned char n = (unsigned char)strlen(name);
@@ -320,16 +295,17 @@ static unsigned char is_sgx(char *name) {
     return (c1 == 'S' && c2 == 'G' && c3 == 'X') ? 1 : 0;
 }
 
+// File_Command is an internal SCC library function not exposed in headers.
+extern unsigned char File_Command(void);
+
 // --------------------------------------------------------------------------
 // Scan the configured directory for SGX files and populate filenames[].
-// The path is passed without a wildcard — Dir_Read does not support wildcards;
-// we filter by .SGX extension here.
+// DIRINP requires a wildcard component — append '*.*' to the directory path.
 // --------------------------------------------------------------------------
 static unsigned char scan_dir(void) {
     char searchpath[60];
     int n, i;
     unsigned char plen;
-    DirEntry *entry;
 
     strncpy(searchpath, cfgdat + 5, 52);
     searchpath[52] = 0;
@@ -337,28 +313,67 @@ static unsigned char scan_dir(void) {
     plen = (unsigned char)strlen(searchpath);
     while (plen > 0 && searchpath[plen - 1] == ' ') searchpath[--plen] = 0;
     if (plen > 0 && searchpath[plen - 1] != '\\' && searchpath[plen - 1] != '/') {
-        if (plen < 58) {
+        if (plen < 56) {
             searchpath[plen]     = '\\';
             searchpath[plen + 1] = 0;
             plen++;
         }
     }
+    if (plen < 56) {
+        searchpath[plen]     = '*';
+        searchpath[plen + 1] = '.';
+        searchpath[plen + 2] = '*';
+        searchpath[plen + 3] = 0;
+        plen += 3;
+    }
 
-    // Pass directory path only — no wildcard; kernel does not support them.
-    n = Dir_Read(searchpath,
-                 ATTRIB_DIR,
-                 (void *)dirbuf, (unsigned short)sizeof(dirbuf), 0);
-    if (n <= 0) { file_count = 0; return 0; }
+    // Write path into dbg_line1 (_transfer = common memory) before the call.
+    strncpy(dbg_line1, searchpath, 60);
+    dbg_line1[60] = 0;
+
+    _msemaon();
+    _symmsg[1]  = 38;
+    _symmsg[3]  = _symbank;
+    *((unsigned short*)(_symmsg + 4))  = (unsigned short)sizeof(dirbuf);
+    *((char**)(_symmsg + 6))           = (void*)dirbuf;
+    *((char**)(_symmsg + 8))           = searchpath;
+    _symmsg[10] = ATTRIB_DIR | ATTRIB_VOLUME;
+    _symmsg[11] = _symbank;
+    *((unsigned short*)(_symmsg + 12)) = 0;
+    dbg_fc_ret = File_Command();
+    dbg_msg2   = (unsigned char)_symmsg[2];
+    dbg_msg8   = (unsigned char)_symmsg[8];
+    dbg_msg9   = (unsigned char)_symmsg[9];
+    if (dbg_fc_ret == 0)
+        n = (int)((unsigned int)dbg_msg8 | ((unsigned int)dbg_msg9 << 8));
+    else
+        n = -1;
+    _msemaoff();
+    dir_read_count = n;
+
+    if (dbg_fc_ret == 0 && (dbg_msg8 > 0 || dbg_msg9 > 0))
+        dbg_e_att = (unsigned char)dirbuf[8];
+    else
+        dbg_e_att = 0xFF;
+
+    if (n <= 0) { dir_read_ok = 0; file_count = 0; return 0; }
+    dir_read_ok = 1;
 
     file_count = 0;
-    entry = (DirEntry *)dirbuf;
-    for (i = 0; i < n && file_count < MAX_FILES; i++) {
-        if (!(entry->attrib & ATTRIB_DIR) && is_sgx(entry->name)) {
-            strncpy(filenames[file_count], entry->name, 13);
-            filenames[file_count][13] = 0;
-            file_count++;
+    {
+        char *raw = dirbuf;
+        unsigned char name_len;
+        for (i = 0; i < n && file_count < MAX_FILES; i++) {
+            unsigned char raw_attrib = (unsigned char)raw[8];
+            char *name = raw + 9;
+            name_len = (unsigned char)strlen(name);
+            if (!(raw_attrib & ATTRIB_DIR) && is_sgx(name)) {
+                strncpy(filenames[file_count], name, 13);
+                filenames[file_count][13] = 0;
+                file_count++;
+            }
+            raw += 9 + name_len + 1;
         }
-        entry++;
     }
     return file_count;
 }
@@ -467,7 +482,6 @@ void start_animation(void) {
     char filepath[70];
     char basepath[60];
 
-    // Detect platform and set screen dimensions
     is_msx = ((Sys_Type() & TYPE_MSX) != 0) ? 1 : 0;
     if (is_msx) {
         screen_w = SCREEN_W_MSX;
@@ -478,6 +492,20 @@ void start_animation(void) {
     }
 
     scan_dir();
+
+    // dbg_line1 holds the searchpath (written by scan_dir).
+    sprintf(dbg_line2, "FC:%02X HL:%02X%02X B:%d S:%d D:%d",
+            (unsigned int)dbg_fc_ret,
+            (unsigned int)dbg_msg9, (unsigned int)dbg_msg8,
+            (int)_symbank, (int)file_count, dir_read_count);
+
+    dbg_ct1.text  = dbg_line1;
+    dbg_ct1.color = (COLOR_WHITE << 2) | COLOR_BLACK;
+    dbg_ct1.flags = 0;
+
+    dbg_ct2.text  = dbg_line2;
+    dbg_ct2.color = (COLOR_WHITE << 2) | COLOR_BLACK;
+    dbg_ct2.flags = 0;
 
     empty_str[0] = 0;
 
@@ -491,8 +519,28 @@ void start_animation(void) {
     anim_ctrl[0].h      = screen_h;
     anim_ctrl[0].unused = 0;
 
+    anim_ctrl[1].value  = 0;
+    anim_ctrl[1].type   = C_TEXT;
+    anim_ctrl[1].bank   = -1;
+    anim_ctrl[1].param  = (unsigned short)&dbg_ct1;
+    anim_ctrl[1].x      = 2;
+    anim_ctrl[1].y      = 4;
+    anim_ctrl[1].w      = screen_w - 4;
+    anim_ctrl[1].h      = 8;
+    anim_ctrl[1].unused = 0;
+
+    anim_ctrl[2].value  = 0;
+    anim_ctrl[2].type   = C_TEXT;
+    anim_ctrl[2].bank   = -1;
+    anim_ctrl[2].param  = (unsigned short)&dbg_ct2;
+    anim_ctrl[2].x      = 2;
+    anim_ctrl[2].y      = 14;
+    anim_ctrl[2].w      = screen_w - 4;
+    anim_ctrl[2].h      = 8;
+    anim_ctrl[2].unused = 0;
+
     memset(&anim_cg, 0, sizeof(anim_cg));
-    anim_cg.controls = 1;
+    anim_cg.controls = 3;
     anim_cg.pid      = _sympid;
     anim_cg.first    = &anim_ctrl[0];
 
@@ -516,6 +564,8 @@ void start_animation(void) {
     if (wid < 0) return;
 
     desktop_stop((unsigned char)wid);
+
+    wait_delay(500u); // 10-second pause so debug text can be read
 
     delay = get_delay_ticks((unsigned char)cfgdat[4]);
 
@@ -548,20 +598,7 @@ void start_animation(void) {
             if (result == 0)
                 cur_file = (unsigned char)((cur_file + 1) % fc);
         } else {
-            // No SGX files found — fill with ink 2 (0x0F = dim grey in Mode 1)
-            // so the user can distinguish "running but no files" from a crash.
-            if (!is_msx) {
-                unsigned char k2;
-                unsigned short i2;
-                for (i2 = 0; i2 < 8320u; i2++) lbuf[i2] = 0x0Fu;
-                for (k2 = 0; k2 < 8; k2++) {
-                    Bank_Copy(0,
-                        (char *)(0xC000u + (unsigned short)k2 * 0x0800u),
-                        _symbank, (char *)lbuf, 2000u);
-                }
-            } else {
-                vdp_fill(0u, 0x99u, 54272u);  // green on MSX = visible non-black
-            }
+            vram_clear();
             result = wait_delay(500u);
         }
     }
@@ -580,6 +617,8 @@ int main(int argc, char *argv[]) {
     unsigned short resp;
     unsigned char  got_msg, sender, b;
 
+    dir_read_ok    = 0;
+    dir_read_count = 0;
     cfgdat[0] = 'S'; cfgdat[1] = 'L'; cfgdat[2] = 'I'; cfgdat[3] = 'D';
     cfgdat[4] = 2;   // delay: 5 s
     cfgdat[5]  = 'A'; cfgdat[6]  = ':'; cfgdat[7]  = '\\';
