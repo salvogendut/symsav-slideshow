@@ -205,50 +205,82 @@ static void vram_restore_lower(void) {
 }
 
 // --------------------------------------------------------------------------
+// MSX: Load all SGX extended chunks into VRAM row-by-row.
+// Reads all chunk headers first, then processes in batches of 32 rows,
+// staging each batch in lbuf before blitting top-to-bottom.
+// No column artifact: all horizontal strips appear per scan line.
+// --------------------------------------------------------------------------
+static void load_image_msx(unsigned char fd) {
+    unsigned char nc, ci;
+    unsigned short crb[4];
+    unsigned short cds[4];
+    unsigned short ccum[4];
+    unsigned short ht, fpos, bs, brows, r2, vx, loff, br;
+
+    nc = 0; ht = 0; fpos = 0;
+    while (nc < 4) {
+        br = File_Read(fd, _symbank, (char *)chunk_hdr, 3u);
+        fpos += br;
+        if (br < 3 || chunk_hdr[0] == 0) break;
+        if (!(chunk_hdr[0] & 0x40) || (chunk_hdr[0] & 0x80)) break;
+        br = File_Read(fd, _symbank, (char *)ext_hdr, 5u);
+        fpos += br;
+        if (br < 5 || chunk_hdr[1] != 0x05) break;
+        crb[nc] = (unsigned short)chunk_hdr[2] | ((unsigned short)ext_hdr[0] << 8);
+        ht      = (unsigned short)ext_hdr[3]   | ((unsigned short)ext_hdr[4] << 8);
+        cds[nc] = fpos;
+        fpos   += ht * crb[nc];
+        File_Seek(fd, (long)fpos, SEEK_SET);
+        nc++;
+    }
+    if (nc == 0 || ht == 0) return;
+
+    ccum[0] = 0;
+    for (ci = 1; ci < nc; ci++)
+        ccum[ci] = ccum[ci - 1] + crb[ci - 1];
+
+    // Process in batches of 32 rows (32*256=8192 bytes staging fits in lbuf)
+    for (bs = 0; bs < ht; bs += 32u) {
+        brows = (bs + 32u <= ht) ? 32u : (ht - bs);
+        for (ci = 0; ci < nc; ci++) {
+            File_Seek(fd, (long)(cds[ci] + bs * crb[ci]), SEEK_SET);
+            File_Read(fd, _symbank,
+                      (char *)lbuf + 32u * ccum[ci],
+                      brows * crb[ci]);
+        }
+        for (r2 = 0; r2 < brows; r2++) {
+            vx = 0;
+            for (ci = 0; ci < nc; ci++) {
+                loff = 32u * ccum[ci] + r2 * crb[ci];
+                vdp_write((bs + r2) * 256u + vx,
+                          (char *)lbuf + loff,
+                          crb[ci]);
+                vx += crb[ci];
+            }
+        }
+    }
+}
+
+// --------------------------------------------------------------------------
 // Open and display all chunks of one SGX file.
 //
-// CPC: reads chunk 0 entirely into lbuf staging, then blits full rows
-//      (chunk0 left + chunk1 right) top-to-bottom via Bank_Copy.
-//      No column artifact — both halves appear together per scan line.
-//      Rebuilds lbuf shadow from VRAM when done.
-//
-// MSX: unchanged — reads extended chunks sequentially.
+// CPC: stages chunk 0 in lbuf, blits full rows (both halves together).
+// MSX: batch-staged row-by-row blit — no column artifact.
 // --------------------------------------------------------------------------
 static unsigned char load_image(char *path) {
-    unsigned char fd, compressed;
+    unsigned char fd;
     unsigned short bytes_read;
-    unsigned short row_bytes, height, x_off, r;
+    unsigned short rb0, rb1, ht, r;
+    unsigned char scan, crow;
+    unsigned short addr;
 
     fd = File_Open(_symbank, path);
     if (fd > 7) return 0;
 
     if (is_msx) {
-        x_off = 0;
-        for (;;) {
-            bytes_read = File_Read(fd, _symbank, (char *)chunk_hdr, 3u);
-            if (bytes_read < 3 || chunk_hdr[0] == 0) break;
-            compressed = (chunk_hdr[0] & 0x80) ? 1 : 0;
-            if (!(chunk_hdr[0] & 0x40)) break;
-            if (compressed) break;
-            bytes_read = File_Read(fd, _symbank, (char *)ext_hdr, 5u);
-            if (bytes_read < 5 || chunk_hdr[1] != 0x05) break;
-            row_bytes = (unsigned short)chunk_hdr[2]
-                      | ((unsigned short)ext_hdr[0] << 8);
-            height    = (unsigned short)ext_hdr[3]
-                      | ((unsigned short)ext_hdr[4] << 8);
-            if (row_bytes == 0 || height == 0) break;
-            if (row_bytes > sizeof(imgbuf)) break;
-            for (r = 0; r < height; r++) {
-                File_Read(fd, _symbank, (char *)imgbuf, row_bytes);
-                vdp_write(r * 256u + x_off, (char *)imgbuf, row_bytes);
-            }
-            x_off += row_bytes;
-        }
+        load_image_msx(fd);
     } else {
         // CPC: stage chunk 0 in lbuf, then blit full rows top-to-bottom
-        unsigned short rb0, rb1, ht;
-        unsigned char scan, crow;
-        unsigned short addr;
 
         // Read chunk 0 header
         bytes_read = File_Read(fd, _symbank, (char *)chunk_hdr, 3u);
