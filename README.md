@@ -150,6 +150,10 @@ A 512×212 image is split into 4 strips so each uncompressed payload ≤ 16 384 
 | 2 | 152 | 304–455 |
 | 3 | 228 | 456–511 |
 
-Each strip covers all 212 rows. Rows are read one at a time via `File_Read`
-and written directly to VDP VRAM with `vdp_write`. Compressed extended chunks
-are not supported.
+All chunk headers are read upfront via `File_Seek` to record each chunk's data
+offset and row width. The image is then loaded in 32-row batches: for each batch,
+`File_Seek` positions within each chunk's data and `File_Read` fills the
+corresponding slice of `lbuf`. Complete rows are then blitted top-to-bottom
+via `vdp_write`, assembling all chunks left-to-right per row before advancing.
+This ensures the screen fills one full row at a time with no visible column
+artifacts. Compressed extended chunks are not supported.
